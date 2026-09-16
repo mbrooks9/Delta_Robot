@@ -18,7 +18,7 @@ def generate_launch_description():
       ),
       Node(
           package='my_pi_nodes',
-          executable='Motor_Cmd',
+          executable='MotorCmd',
           name='DeltaControl',
           output='screen',
       ),
