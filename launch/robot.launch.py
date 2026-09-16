@@ -13,13 +13,13 @@ def generate_launch_description():
       Node(
           package='my_pi_nodes',
           executable='controller',
-          name='Controller',
+          name='controller',
           output='screen',
       ),
       Node(
           package='my_pi_nodes',
           executable='MotorCmd',
-          name='DeltaControl',
+          name='MotorCmd',
           output='screen',
       ),
   ])
