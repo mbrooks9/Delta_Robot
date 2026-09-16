@@ -30,7 +30,7 @@ import numpy as np
 
 # ---- Import your control core ----
 # Option A: if test.py is in same folder as Control_Test.py
-from Control_Test import dynamics
+from my_pi_nodes.my_pi_nodes.Control_Test import dynamics
 
 # If you instead want to import from a package, do something like:
 # from my_pi_nodes.Control_Test import dynamics
