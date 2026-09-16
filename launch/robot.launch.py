@@ -10,16 +10,16 @@ def generate_launch_description():
           name='serial_bridge',
           output='screen',
       ),
-      Node(
-          package='my_pi_nodes',
-          executable='controller',
-          name='Controller',
-          output='screen',
-      ),
-      Node(
-          package='my_pi_nodes',
-          executable='MotorCmd',
-          name='DeltaControl',
-          output='screen',
-      ),
+    #   Node(
+    #       package='my_pi_nodes',
+    #       executable='controller',
+    #       name='Controller',
+    #       output='screen',
+    #   ),
+    #   Node(
+    #       package='my_pi_nodes',
+    #       executable='MotorCmd',
+    #       name='DeltaControl',
+    #       output='screen',
+    #   ),
   ])
