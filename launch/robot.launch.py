@@ -18,8 +18,8 @@ def generate_launch_description():
       ),
       Node(
           package='my_pi_nodes',
-          executable='MotorCmd',
-          name='MotorCmd',
+          executable='MotorCmd_Test',
+          name='MotorCmd_Test',
           output='screen',
       ),
   ])
