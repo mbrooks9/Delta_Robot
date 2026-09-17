@@ -3,10 +3,10 @@ import numpy as np
 
 
 # robot geometry
-e  = 45   
-f  = 80  
-re = 272
-rf = 235
+e  = 66 
+f  = 119  
+re = 445
+rf = 66
             
 # trigonometric constants
 sqrt3  = math.sqrt(3.0)
