@@ -1,30 +1,45 @@
 #include <Arduino.h>
 
 // -------- Pins --------
-const uint8_t STEP_PINS[4] = {5, 6, 9, 10};  // A,B,C,linear
-const uint8_t DIR_PINS [4] = {4, 7, 8, 11};  // A,B,C,linear
-const uint8_t MOTOR_COUNT = 4;
-const uint8_t LINEAR_LIMIT_PIN = 12;
+const uint8_t STEP_PINS[3] = {5, 6, 9};  // A,B,C
+const uint8_t DIR_PINS [3] = {4, 7, 8};  // A,B,C
+const uint8_t DELTA_MOTOR_COUNT = 3;
 
-// The linear motor channel assumes a STEP/DIR driver.  Do not connect a
-// motor directly to an Arduino pin; use a suitable driver and motor supply.
+// MNTL is a brushed DC actuator. Select the H-bridge board you are using.
+#define LINEAR_DRIVER_L298N  0
+#define LINEAR_DRIVER_BTS7960 1
+const uint8_t LINEAR_DRIVER = LINEAR_DRIVER_L298N;
+
+// Shared Arduino allocation:
+//   L298N:    D10=ENA,  D11=IN1,  D13=IN2
+//   BTS7960:  D10=RPWM, D11=LPWM, D13=R_EN and L_EN (both tied together)
+const uint8_t LINEAR_PWM_A_PIN = 10;
+const uint8_t LINEAR_PWM_B_PIN = 11;
+const uint8_t LINEAR_CONTROL_PIN = 13;
+const uint8_t LINEAR_LIMIT_PIN = 12;  // optional external limit, active LOW
+const uint8_t LINEAR_PWM = 255;     // full actuator power
+const bool USE_EXTERNAL_LINEAR_LIMIT = false;
+
+// Do not connect the actuator directly to Arduino pins.  Use the selected
+// H-bridge and a separate 12 V motor supply.  The MNTL's internal end switches are not
+// normally available as a separate Arduino input.
 const uint32_t COMMAND_TIMEOUT_US = 250000UL;
 const uint32_t LINEAR_MAX_RUN_US = 5000000UL;
 
 // -------- State from serial --------
 
-// cmd[i] is a *signed off_us* value from the Pi:
+// cmd[0..2] are *signed off_us* values from the Pi:
 //   0   -> motor stopped
 //   >0  -> forward, off_us =  cmd[i]
 //   <0  -> reverse, off_us = -cmd[i]
-// cmd[3] is the linear motor.  A three-value legacy command stops it.
-float cmd[MOTOR_COUNT] = {0.0f, 0.0f, 0.0f, 0.0f};
+// cmd[3] is a signed one-shot direction request for the linear actuator.
+float cmd[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
 const uint16_t on_us = 5;   // HIGH pulse width for all motors
 
 // -------- Pulse schedulers (per motor) --------
-bool          step_high[MOTOR_COUNT]      = {false, false, false, false};
-unsigned long next_toggle_us[MOTOR_COUNT] = {0, 0, 0, 0};
+bool          step_high[DELTA_MOTOR_COUNT]      = {false, false, false};
+unsigned long next_toggle_us[DELTA_MOTOR_COUNT] = {0, 0, 0};
 unsigned long last_command_us = 0;
 bool          have_command = false;
 bool          linear_running = false;
@@ -89,14 +104,22 @@ bool read_serial() {
 }
 
 // ---------------- Motor driving ----------------
+void stopLinearMotor() {
+  analogWrite(LINEAR_PWM_A_PIN, 0);
+  analogWrite(LINEAR_PWM_B_PIN, 0);
+  digitalWrite(LINEAR_CONTROL_PIN, LOW);
+}
+
 void updateLinearMove(unsigned long now, bool command_fresh) {
   bool linear_request = command_fresh && fabs(cmd[3]) >= 1.0f;
-  bool limit_hit = (digitalRead(LINEAR_LIMIT_PIN) == LOW);
+  bool limit_hit = USE_EXTERNAL_LINEAR_LIMIT &&
+      (digitalRead(LINEAR_LIMIT_PIN) == LOW);
 
   // A lost serial link must stop an in-progress linear move immediately.
   if (!command_fresh && linear_running) {
     linear_running = false;
     linear_run_cmd = 0.0f;
+    stopLinearMotor();
   }
 
   // A button release rearms the one-shot trigger.  Keeping the button held
@@ -110,12 +133,24 @@ void updateLinearMove(unsigned long now, bool command_fresh) {
     linear_armed = false;
     linear_run_cmd = cmd[3];
     linear_started_us = now;
+
+    bool forward = linear_run_cmd > 0.0f;
+    if (LINEAR_DRIVER == LINEAR_DRIVER_L298N) {
+      digitalWrite(LINEAR_PWM_B_PIN, forward ? HIGH : LOW);  // IN1
+      digitalWrite(LINEAR_CONTROL_PIN, forward ? LOW : HIGH);  // IN2
+      analogWrite(LINEAR_PWM_A_PIN, LINEAR_PWM);  // ENA
+    } else {
+      digitalWrite(LINEAR_CONTROL_PIN, HIGH);  // R_EN and L_EN
+      analogWrite(LINEAR_PWM_A_PIN, forward ? LINEAR_PWM : 0);  // RPWM
+      analogWrite(LINEAR_PWM_B_PIN, forward ? 0 : LINEAR_PWM);  // LPWM
+    }
   }
 
   if (linear_running &&
       (limit_hit || (unsigned long)(now - linear_started_us) >= LINEAR_MAX_RUN_US)) {
     linear_running = false;
     linear_run_cmd = 0.0f;
+    stopLinearMotor();
   }
 }
 
@@ -129,13 +164,8 @@ void driveMotors() {
 
   updateLinearMove(now, command_fresh);
 
-  for (int i = 0; i < MOTOR_COUNT; ++i) {
-    float c = 0.0f;
-    if (i < 3) {
-      c = command_fresh ? cmd[i] : 0.0f;
-    } else if (linear_running && command_fresh) {
-      c = linear_run_cmd;
-    }
+  for (int i = 0; i < DELTA_MOTOR_COUNT; ++i) {
+    float c = command_fresh ? cmd[i] : 0.0f;
 
     // If nearly zero -> motor stopped
     if (fabs(c) < 1.0f) {  // threshold so tiny noise doesn't move the motor
@@ -177,13 +207,19 @@ void driveMotors() {
 // ---------------- Arduino boilerplate ----------------
 void setup() {
   Serial.begin(115200);
-  Serial.println(F("Ready. Format: cmdA,cmdB,cmdC,linear  (linear runs to limit or 5s)"));
+  Serial.println(F("Ready. Format: cmdA,cmdB,cmdC,linear  (linear to limit or 5s)"));
 
-  // Wire a normally-open limit switch between D12 and GND.  It is active
-  // LOW when pressed.  The internal pull-up avoids an extra resistor.
-  pinMode(LINEAR_LIMIT_PIN, INPUT_PULLUP);
+  if (USE_EXTERNAL_LINEAR_LIMIT) {
+    // Optional external switch: wire between D12 and GND.  It is active LOW.
+    pinMode(LINEAR_LIMIT_PIN, INPUT_PULLUP);
+  }
 
-  for (int i = 0; i < MOTOR_COUNT; i++) {
+  pinMode(LINEAR_PWM_A_PIN, OUTPUT);
+  pinMode(LINEAR_PWM_B_PIN, OUTPUT);
+  pinMode(LINEAR_CONTROL_PIN, OUTPUT);
+  stopLinearMotor();
+
+  for (int i = 0; i < DELTA_MOTOR_COUNT; i++) {
     pinMode(STEP_PINS[i], OUTPUT);
     pinMode(DIR_PINS[i],  OUTPUT);
     digitalWrite(STEP_PINS[i], LOW);
@@ -194,5 +230,5 @@ void setup() {
 
 void loop() {
   read_serial();   // update commands when new line arrives
-  driveMotors();   // run all four in parallel with independent timing
+  driveMotors();   // run delta steppers and update the linear actuator
 }
