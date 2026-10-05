@@ -29,7 +29,6 @@ const float LINEAR_OPEN_CMD = -1.0f;
 // H-bridge and a separate 12 V motor supply.  The MNTL's internal end switches are not
 // normally available as a separate Arduino input.
 const uint32_t COMMAND_TIMEOUT_US = 250000UL;
-const uint32_t LINEAR_MAX_RUN_US = 5000000UL;
 
 // -------- State from serial --------
 
@@ -50,7 +49,6 @@ bool          have_command = false;
 bool          linear_running = false;
 bool          linear_button_armed = true;
 float         linear_run_cmd = 0.0f;
-unsigned long linear_started_us = 0;
 
 enum LinearState {
   LINEAR_OPENING,
@@ -58,7 +56,8 @@ enum LinearState {
   LINEAR_CLOSING,
   LINEAR_CLOSED
 };
-LinearState linear_state = LINEAR_OPENING;
+// Without a startup run or a position sensor, assume the actuator starts open.
+LinearState linear_state = LINEAR_OPEN;
 
 // -------- Serial buffer --------
 #define LINE_BUF 96
@@ -124,10 +123,9 @@ void stopLinearMotor() {
   digitalWrite(LINEAR_CONTROL_PIN, LOW);
 }
 
-void startLinearMove(float direction_cmd, unsigned long now) {
+void startLinearMove(float direction_cmd) {
   linear_running = true;
   linear_run_cmd = direction_cmd;
-  linear_started_us = now;
   linear_state = (direction_cmd > 0.0f) ? LINEAR_CLOSING : LINEAR_OPENING;
 
   bool forward = direction_cmd > 0.0f;
@@ -150,7 +148,7 @@ void finishLinearMove() {
   stopLinearMotor();
 }
 
-void updateLinearMove(unsigned long now, bool command_fresh) {
+void updateLinearMove(bool command_fresh) {
   bool button_pressed = command_fresh && fabs(cmd[3]) >= 1.0f;
   bool limit_hit = USE_EXTERNAL_LINEAR_LIMIT &&
       (digitalRead(LINEAR_LIMIT_PIN) == LOW);
@@ -168,17 +166,20 @@ void updateLinearMove(unsigned long now, bool command_fresh) {
     linear_button_armed = true;
   }
 
-  if (!linear_running && button_pressed && linear_button_armed && !limit_hit) {
+  if (button_pressed && linear_button_armed && !limit_hit) {
     linear_button_armed = false;
-    if (linear_state == LINEAR_OPEN) {
-      startLinearMove(LINEAR_CLOSE_CMD, now);
-    } else if (linear_state == LINEAR_CLOSED) {
-      startLinearMove(LINEAR_OPEN_CMD, now);
+    if (linear_running) {
+      // A new press reverses the actuator immediately, even if the previous
+      // move has not reached its end.
+      startLinearMove(-linear_run_cmd);
+    } else if (linear_state == LINEAR_OPEN || linear_state == LINEAR_OPENING) {
+      startLinearMove(LINEAR_CLOSE_CMD);
+    } else if (linear_state == LINEAR_CLOSED || linear_state == LINEAR_CLOSING) {
+      startLinearMove(LINEAR_OPEN_CMD);
     }
   }
 
-  if (linear_running &&
-      (limit_hit || (unsigned long)(now - linear_started_us) >= LINEAR_MAX_RUN_US)) {
+  if (linear_running && limit_hit) {
     finishLinearMove();
   }
 }
@@ -191,7 +192,7 @@ void driveMotors() {
   bool command_fresh = have_command &&
       (unsigned long)(now - last_command_us) <= COMMAND_TIMEOUT_US;
 
-  updateLinearMove(now, command_fresh);
+  updateLinearMove(command_fresh);
 
   for (int i = 0; i < DELTA_MOTOR_COUNT; ++i) {
     float c = command_fresh ? cmd[i] : 0.0f;
@@ -236,7 +237,7 @@ void driveMotors() {
 // ---------------- Arduino boilerplate ----------------
 void setup() {
   Serial.begin(115200);
-  Serial.println(F("Ready. Format: cmdA,cmdB,cmdC,linear  (linear to limit or 5s)"));
+  Serial.println(F("Ready. Format: cmdA,cmdB,cmdC,linear  (linear toggles direction on each press)"));
 
   if (USE_EXTERNAL_LINEAR_LIMIT) {
     // Optional external switch: wire between D12 and GND.  It is active LOW.
@@ -247,9 +248,6 @@ void setup() {
   pinMode(LINEAR_PWM_B_PIN, OUTPUT);
   pinMode(LINEAR_CONTROL_PIN, OUTPUT);
   stopLinearMotor();
-
-  // Establish a known starting state by opening the gripper on startup.
-  startLinearMove(LINEAR_OPEN_CMD, micros());
 
   for (int i = 0; i < DELTA_MOTOR_COUNT; i++) {
     pinMode(STEP_PINS[i], OUTPUT);
