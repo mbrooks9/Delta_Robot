@@ -37,6 +37,18 @@ class MotorCmdTest(Node):
     def __init__(self):
         super().__init__("motorcmd_test")
 
+        # A controller button triggers the fourth, linear STEP/DIR channel.
+        self.declare_parameter('linear_button', 0)
+        self.declare_parameter('linear_direction', 1.0)
+        self.declare_parameter('linear_off_us', 3000.0)
+        self.linear_button = int(self.get_parameter('linear_button').value)
+        self.linear_direction = float(self.get_parameter('linear_direction').value)
+        if self.linear_direction == 0.0:
+            self.linear_direction = 1.0
+        else:
+            self.linear_direction = 1.0 if self.linear_direction > 0.0 else -1.0
+        self.linear_off_us = max(1.0, float(self.get_parameter('linear_off_us').value))
+
         self.ctrl = dynamics([0.0, 0.0, 0.0])
         self.last_joy = Joy()
 
@@ -48,6 +60,13 @@ class MotorCmdTest(Node):
 
     def on_joy(self, msg: Joy):
         self.last_joy = msg
+
+    def linear_motor_command(self) -> float:
+        """Return the trigger command while the configured button is held."""
+        if 0 <= self.linear_button < len(self.last_joy.buttons):
+            if self.last_joy.buttons[self.linear_button]:
+                return self.linear_direction * self.linear_off_us
+        return 0.0
 
     def joy_to_tip_vel(self) -> np.ndarray:
         axes = self.last_joy.axes if self.last_joy.axes else []
@@ -90,7 +109,12 @@ class MotorCmdTest(Node):
         )
 
         m = MotorCmd()
-        m.data = [float(off_us[0]), float(off_us[1]), float(off_us[2])]
+        m.data = [
+            float(off_us[0]),
+            float(off_us[1]),
+            float(off_us[2]),
+            self.linear_motor_command(),
+        ]
         self.pub_motor.publish(m)
 
 

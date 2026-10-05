@@ -19,7 +19,8 @@ class SerialBridge(Node):
         self.declare_parameter('port', '/dev/ttyUSB0')
         self.declare_parameter('baud', 115200)
         self.declare_parameter('rate_hz', 50.0)
-        # For the new Arduino code we always use CSV: "cmdA,cmdB,cmdC\n"
+        # CSV format: "cmdA,cmdB,cmdC,linear\n".  Three-value messages
+        # remain accepted for compatibility and get a stopped linear channel.
         self.declare_parameter('format', 'csv')
 
         port = self.get_parameter('port').value
@@ -38,7 +39,8 @@ class SerialBridge(Node):
         time.sleep(2.0)
         self.get_logger().info(f"Opened {port} @ {baud} (format={self.format})")
 
-        # We now expect exactly 3 elements: [cmdA, cmdB, cmdC]
+        # The first three elements are the delta motors; the optional fourth
+        # element is the linear motor.
         self.last_cmd = None
 
         # Buffer for incoming Arduino text
@@ -55,12 +57,13 @@ class SerialBridge(Node):
 
     def on_cmd(self, msg: MotorCmd):
         data = list(msg.data)
-        if len(data) != 3:
+        if len(data) not in (3, 4):
             self.get_logger().warn(
-                f"motor_cmd has {len(data)} elems; need exactly 3: [cmdA, cmdB, cmdC]. Skipping."
+                f"motor_cmd has {len(data)} elems; need 3 or 4: "
+                "[cmdA, cmdB, cmdC, linear]. Skipping."
             )
             return
-        self.last_cmd = data  # atomic replace
+        self.last_cmd = data[:3] + ([data[3]] if len(data) == 4 else [0.0])
 
     def _read_arduino(self):
         """Non-blocking read; log any full lines from the Arduino."""
@@ -94,16 +97,17 @@ class SerialBridge(Node):
 
         # 2) Send latest motor command
         data = self.last_cmd
-        if not data or len(data) != 3:
+        if not data or len(data) != 4:
             return
 
         try:
-            # Convert to ints so Arduino can parse with "%ld,%ld,%ld"
+            # Convert to ints so Arduino can parse signed off_us values.
             a = int(round(float(data[0])))
             b = int(round(float(data[1])))
             c = int(round(float(data[2])))
+            linear = int(round(float(data[3])))
 
-            line = f"{a},{b},{c}\n"
+            line = f"{a},{b},{c},{linear}\n"
             self.ser.write(line.encode('ascii'))
 
             # Change to debug if too chatty

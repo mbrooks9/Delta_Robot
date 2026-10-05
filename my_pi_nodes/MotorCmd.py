@@ -25,6 +25,19 @@ class DeltaControl(Node):
     def __init__(self):
         super().__init__('delta_control')
 
+        # A controller button triggers the fourth, linear STEP/DIR channel.
+        # Button numbers come from pygame's zero-based joystick numbering.
+        self.declare_parameter('linear_button', 0)
+        self.declare_parameter('linear_direction', 1.0)
+        self.declare_parameter('linear_off_us', 3000.0)
+        self.linear_button = int(self.get_parameter('linear_button').value)
+        self.linear_direction = float(self.get_parameter('linear_direction').value)
+        if self.linear_direction == 0.0:
+            self.linear_direction = 1.0
+        else:
+            self.linear_direction = 1.0 if self.linear_direction > 0.0 else -1.0
+        self.linear_off_us = max(1.0, float(self.get_parameter('linear_off_us').value))
+
         # --- state ---
         thetas0 = np.array([0.0, 0.0, 0.0])
         self.ctrl = dynamics(thetas0)
@@ -97,6 +110,13 @@ class DeltaControl(Node):
             self.get_logger().info("Move cancelled by joystick button.")
             self.mover.stop()
 
+    def linear_motor_command(self) -> float:
+        """Return the trigger command while the configured button is held."""
+        if 0 <= self.linear_button < len(self.last_joy.buttons):
+            if self.last_joy.buttons[self.linear_button]:
+                return self.linear_direction * self.linear_off_us
+        return 0.0
+
     def joy_to_tip_vel(self) -> np.ndarray:
         axes = self.last_joy.axes if self.last_joy.axes else [0.0]*6
 
@@ -163,7 +183,12 @@ class DeltaControl(Node):
             print(f"Steps: {scaled}")
 
         m = MotorCmd()
-        m.data = [float(scaled[0]), float(scaled[1]), float(scaled[2])]
+        m.data = [
+            float(scaled[0]),
+            float(scaled[1]),
+            float(scaled[2]),
+            self.linear_motor_command(),
+        ]
         self.pub_motor.publish(m)
 
 

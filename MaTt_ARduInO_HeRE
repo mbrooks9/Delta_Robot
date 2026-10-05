@@ -1,8 +1,15 @@
 #include <Arduino.h>
 
 // -------- Pins --------
-const uint8_t STEP_PINS[3] = {5, 6, 9};  // A,B,C
-const uint8_t DIR_PINS [3] = {4, 7, 8};  // A,B,C
+const uint8_t STEP_PINS[4] = {5, 6, 9, 10};  // A,B,C,linear
+const uint8_t DIR_PINS [4] = {4, 7, 8, 11};  // A,B,C,linear
+const uint8_t MOTOR_COUNT = 4;
+const uint8_t LINEAR_LIMIT_PIN = 12;
+
+// The linear motor channel assumes a STEP/DIR driver.  Do not connect a
+// motor directly to an Arduino pin; use a suitable driver and motor supply.
+const uint32_t COMMAND_TIMEOUT_US = 250000UL;
+const uint32_t LINEAR_MAX_RUN_US = 5000000UL;
 
 // -------- State from serial --------
 
@@ -10,17 +17,26 @@ const uint8_t DIR_PINS [3] = {4, 7, 8};  // A,B,C
 //   0   -> motor stopped
 //   >0  -> forward, off_us =  cmd[i]
 //   <0  -> reverse, off_us = -cmd[i]
-float cmd[3] = {0.0f, 0.0f, 0.0f};
+// cmd[3] is the linear motor.  A three-value legacy command stops it.
+float cmd[MOTOR_COUNT] = {0.0f, 0.0f, 0.0f, 0.0f};
 
 const uint16_t on_us = 5;   // HIGH pulse width for all motors
 
 // -------- Pulse schedulers (per motor) --------
-bool          step_high[3]      = {false, false, false};
-unsigned long next_toggle_us[3] = {0, 0, 0};
+bool          step_high[MOTOR_COUNT]      = {false, false, false, false};
+unsigned long next_toggle_us[MOTOR_COUNT] = {0, 0, 0, 0};
+unsigned long last_command_us = 0;
+bool          have_command = false;
+bool          linear_running = false;
+bool          linear_armed = true;
+float         linear_run_cmd = 0.0f;
+unsigned long linear_started_us = 0;
 
 // -------- Serial buffer --------
 #define LINE_BUF 96
 char linebuf[LINE_BUF];
+uint8_t line_len = 0;
+bool line_overflow = false;
 
 // ---------------- Utils ----------------
 static inline void trimTail(char* s) {
@@ -29,40 +45,97 @@ static inline void trimTail(char* s) {
 }
 
 // ---------------- Serial parser ----------------
-// Format from Pi: "cmdA,cmdB,cmdC\n"
+// Format from Pi: "cmdA,cmdB,cmdC,linear\n"
 // Each is a signed integer off_us (e.g. -2200, 0, 2600).
 bool read_serial() {
-  if (!Serial.available()) return false;
+  bool parsed = false;
 
-  size_t n = Serial.readBytesUntil('\n', linebuf, LINE_BUF - 1);
-  linebuf[n] = '\0';
-  trimTail(linebuf);
-  if (n == 0) return false;
+  // Consume only bytes already available.  This keeps the motor scheduler
+  // running even if a serial line arrives in fragments.
+  while (Serial.available()) {
+    char ch = (char)Serial.read();
 
-  long a = 0, b = 0, c = 0;
-  if (sscanf(linebuf, "%ld,%ld,%ld", &a, &b, &c) == 3) {
-    cmd[0] = (float)a;
-    cmd[1] = (float)b;
-    cmd[2] = (float)c;
+    if (ch != '\n') {
+      if (line_len < LINE_BUF - 1) {
+        linebuf[line_len++] = ch;
+      } else {
+        line_overflow = true;
+      }
+      continue;
+    }
 
-    // Debug so you can see values in Serial Monitor if needed
-    Serial.print(F("Parsed cmds -> A=")); Serial.print(cmd[0]);
-    Serial.print(F(" B="));              Serial.print(cmd[1]);
-    Serial.print(F(" C="));              Serial.println(cmd[2]);
+    linebuf[line_len] = '\0';
+    trimTail(linebuf);
 
-    return true;
+    if (!line_overflow && line_len > 0) {
+      long a = 0, b = 0, c = 0, linear = 0;
+      int fields = sscanf(linebuf, "%ld,%ld,%ld,%ld", &a, &b, &c, &linear);
+      if (fields == 3 || fields == 4) {
+        cmd[0] = (float)a;
+        cmd[1] = (float)b;
+        cmd[2] = (float)c;
+        cmd[3] = (fields == 4) ? (float)linear : 0.0f;
+        last_command_us = micros();
+        have_command = true;
+        parsed = true;
+      }
+    }
+
+    line_len = 0;
+    line_overflow = false;
   }
 
-  Serial.print(F("Parse fail: ")); Serial.println(linebuf);
-  return false;
+  return parsed;
 }
 
 // ---------------- Motor driving ----------------
+void updateLinearMove(unsigned long now, bool command_fresh) {
+  bool linear_request = command_fresh && fabs(cmd[3]) >= 1.0f;
+  bool limit_hit = (digitalRead(LINEAR_LIMIT_PIN) == LOW);
+
+  // A lost serial link must stop an in-progress linear move immediately.
+  if (!command_fresh && linear_running) {
+    linear_running = false;
+    linear_run_cmd = 0.0f;
+  }
+
+  // A button release rearms the one-shot trigger.  Keeping the button held
+  // after a timeout/limit hit cannot immediately restart the motor.
+  if (!linear_request && !linear_running) {
+    linear_armed = true;
+  }
+
+  if (!linear_running && linear_request && linear_armed && !limit_hit) {
+    linear_running = true;
+    linear_armed = false;
+    linear_run_cmd = cmd[3];
+    linear_started_us = now;
+  }
+
+  if (linear_running &&
+      (limit_hit || (unsigned long)(now - linear_started_us) >= LINEAR_MAX_RUN_US)) {
+    linear_running = false;
+    linear_run_cmd = 0.0f;
+  }
+}
+
 void driveMotors() {
   unsigned long now = micros();
 
-  for (int i = 0; i < 3; ++i) {
-    float c = cmd[i];
+  // If the Pi/USB link stops sending commands, stop every motor.  The Pi
+  // normally refreshes the command at 50 Hz, so 250 ms leaves ample margin.
+  bool command_fresh = have_command &&
+      (unsigned long)(now - last_command_us) <= COMMAND_TIMEOUT_US;
+
+  updateLinearMove(now, command_fresh);
+
+  for (int i = 0; i < MOTOR_COUNT; ++i) {
+    float c = 0.0f;
+    if (i < 3) {
+      c = command_fresh ? cmd[i] : 0.0f;
+    } else if (linear_running && command_fresh) {
+      c = linear_run_cmd;
+    }
 
     // If nearly zero -> motor stopped
     if (fabs(c) < 1.0f) {  // threshold so tiny noise doesn't move the motor
@@ -104,9 +177,13 @@ void driveMotors() {
 // ---------------- Arduino boilerplate ----------------
 void setup() {
   Serial.begin(115200);
-  Serial.println(F("Ready. Format: cmdA,cmdB,cmdC  (signed off_us; 0=stop)"));
+  Serial.println(F("Ready. Format: cmdA,cmdB,cmdC,linear  (linear runs to limit or 5s)"));
 
-  for (int i = 0; i < 3; i++) {
+  // Wire a normally-open limit switch between D12 and GND.  It is active
+  // LOW when pressed.  The internal pull-up avoids an extra resistor.
+  pinMode(LINEAR_LIMIT_PIN, INPUT_PULLUP);
+
+  for (int i = 0; i < MOTOR_COUNT; i++) {
     pinMode(STEP_PINS[i], OUTPUT);
     pinMode(DIR_PINS[i],  OUTPUT);
     digitalWrite(STEP_PINS[i], LOW);
@@ -117,5 +194,5 @@ void setup() {
 
 void loop() {
   read_serial();   // update commands when new line arrives
-  driveMotors();   // run all three in parallel with independent timing
+  driveMotors();   // run all four in parallel with independent timing
 }
