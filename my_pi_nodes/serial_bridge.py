@@ -19,8 +19,8 @@ class SerialBridge(Node):
         self.declare_parameter('port', '/dev/ttyUSB0')
         self.declare_parameter('baud', 115200)
         self.declare_parameter('rate_hz', 50.0)
-        # CSV format: "cmdA,cmdB,cmdC,linear\n".  Three-value messages
-        # remain accepted for compatibility and get a stopped linear channel.
+        # CSV format: "cmdA,cmdB,cmdC,linear\n".  The first three values
+        # are stepper off-times; linear is a signed DC direction request.
         self.declare_parameter('format', 'csv')
 
         port = self.get_parameter('port').value

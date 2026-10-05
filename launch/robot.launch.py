@@ -16,11 +16,6 @@ def generate_launch_description():
           default_value='1.0',
           description='Linear motor direction: 1 or -1',
       ),
-      DeclareLaunchArgument(
-          'linear_off_us',
-          default_value='3000.0',
-          description='Linear motor step off-time in microseconds',
-      ),
       Node(
           package='my_pi_nodes',
           executable='serial_bridge',
@@ -41,7 +36,6 @@ def generate_launch_description():
           parameters=[{
               'linear_button': LaunchConfiguration('linear_button'),
               'linear_direction': LaunchConfiguration('linear_direction'),
-              'linear_off_us': LaunchConfiguration('linear_off_us'),
           }],
       ),
   ])

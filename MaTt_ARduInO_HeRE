@@ -61,7 +61,8 @@ static inline void trimTail(char* s) {
 
 // ---------------- Serial parser ----------------
 // Format from Pi: "cmdA,cmdB,cmdC,linear\n"
-// Each is a signed integer off_us (e.g. -2200, 0, 2600).
+// The first three are signed integer off_us values; linear is a signed
+// direction request (-1, 0, or +1).
 bool read_serial() {
   bool parsed = false;
 
