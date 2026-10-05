@@ -11,11 +11,6 @@ def generate_launch_description():
           default_value='0',
           description='Zero-based controller button that triggers linear motion',
       ),
-      DeclareLaunchArgument(
-          'linear_direction',
-          default_value='1.0',
-          description='Linear motor direction: 1 or -1',
-      ),
       Node(
           package='my_pi_nodes',
           executable='serial_bridge',
@@ -35,7 +30,6 @@ def generate_launch_description():
           output='screen',
           parameters=[{
               'linear_button': LaunchConfiguration('linear_button'),
-              'linear_direction': LaunchConfiguration('linear_direction'),
           }],
       ),
   ])

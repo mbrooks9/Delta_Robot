@@ -25,16 +25,10 @@ class DeltaControl(Node):
     def __init__(self):
         super().__init__('delta_control')
 
-        # A controller button triggers the fourth, linear STEP/DIR channel.
+        # A controller button triggers the fourth, linear DC actuator channel.
         # Button numbers come from pygame's zero-based joystick numbering.
         self.declare_parameter('linear_button', 0)
-        self.declare_parameter('linear_direction', 1.0)
         self.linear_button = int(self.get_parameter('linear_button').value)
-        self.linear_direction = float(self.get_parameter('linear_direction').value)
-        if self.linear_direction == 0.0:
-            self.linear_direction = 1.0
-        else:
-            self.linear_direction = 1.0 if self.linear_direction > 0.0 else -1.0
 
         # --- state ---
         thetas0 = np.array([0.0, 0.0, 0.0])
@@ -112,7 +106,7 @@ class DeltaControl(Node):
         """Return a signed direction request for the DC actuator."""
         if 0 <= self.linear_button < len(self.last_joy.buttons):
             if self.last_joy.buttons[self.linear_button]:
-                return self.linear_direction
+                return 1.0
         return 0.0
 
     def joy_to_tip_vel(self) -> np.ndarray:

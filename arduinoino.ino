@@ -20,6 +20,11 @@ const uint8_t LINEAR_LIMIT_PIN = 12;  // optional external limit, active LOW
 const uint8_t LINEAR_PWM = 255;     // full actuator power
 const bool USE_EXTERNAL_LINEAR_LIMIT = false;
 
+// Set these signs to match the actuator wiring. With the current wiring,
+// positive is close and negative is open.
+const float LINEAR_CLOSE_CMD = 1.0f;
+const float LINEAR_OPEN_CMD = -1.0f;
+
 // Do not connect the actuator directly to Arduino pins.  Use the selected
 // H-bridge and a separate 12 V motor supply.  The MNTL's internal end switches are not
 // normally available as a separate Arduino input.
@@ -43,9 +48,17 @@ unsigned long next_toggle_us[DELTA_MOTOR_COUNT] = {0, 0, 0};
 unsigned long last_command_us = 0;
 bool          have_command = false;
 bool          linear_running = false;
-bool          linear_armed = true;
+bool          linear_button_armed = true;
 float         linear_run_cmd = 0.0f;
 unsigned long linear_started_us = 0;
+
+enum LinearState {
+  LINEAR_OPENING,
+  LINEAR_OPEN,
+  LINEAR_CLOSING,
+  LINEAR_CLOSED
+};
+LinearState linear_state = LINEAR_OPENING;
 
 // -------- Serial buffer --------
 #define LINE_BUF 96
@@ -111,47 +124,62 @@ void stopLinearMotor() {
   digitalWrite(LINEAR_CONTROL_PIN, LOW);
 }
 
+void startLinearMove(float direction_cmd, unsigned long now) {
+  linear_running = true;
+  linear_run_cmd = direction_cmd;
+  linear_started_us = now;
+  linear_state = (direction_cmd > 0.0f) ? LINEAR_CLOSING : LINEAR_OPENING;
+
+  bool forward = direction_cmd > 0.0f;
+  if (LINEAR_DRIVER == LINEAR_DRIVER_L298N) {
+    digitalWrite(LINEAR_PWM_B_PIN, forward ? HIGH : LOW);  // IN1
+    digitalWrite(LINEAR_CONTROL_PIN, forward ? LOW : HIGH);  // IN2
+    analogWrite(LINEAR_PWM_A_PIN, LINEAR_PWM);  // ENA
+  } else {
+    digitalWrite(LINEAR_CONTROL_PIN, HIGH);  // R_EN and L_EN
+    analogWrite(LINEAR_PWM_A_PIN, forward ? LINEAR_PWM : 0);  // RPWM
+    analogWrite(LINEAR_PWM_B_PIN, forward ? 0 : LINEAR_PWM);  // LPWM
+  }
+}
+
+void finishLinearMove() {
+  bool was_closing = linear_state == LINEAR_CLOSING;
+  linear_running = false;
+  linear_run_cmd = 0.0f;
+  linear_state = was_closing ? LINEAR_CLOSED : LINEAR_OPEN;
+  stopLinearMotor();
+}
+
 void updateLinearMove(unsigned long now, bool command_fresh) {
-  bool linear_request = command_fresh && fabs(cmd[3]) >= 1.0f;
+  bool button_pressed = command_fresh && fabs(cmd[3]) >= 1.0f;
   bool limit_hit = USE_EXTERNAL_LINEAR_LIMIT &&
       (digitalRead(LINEAR_LIMIT_PIN) == LOW);
 
   // A lost serial link must stop an in-progress linear move immediately.
-  if (!command_fresh && linear_running) {
+  if (have_command && !command_fresh && linear_running) {
     linear_running = false;
     linear_run_cmd = 0.0f;
     stopLinearMotor();
   }
 
-  // A button release rearms the one-shot trigger.  Keeping the button held
-  // after a timeout/limit hit cannot immediately restart the motor.
-  if (!linear_request && !linear_running) {
-    linear_armed = true;
+  // A button release rearms the toggle. Holding the button after a move
+  // completes cannot immediately start the next move.
+  if (!button_pressed) {
+    linear_button_armed = true;
   }
 
-  if (!linear_running && linear_request && linear_armed && !limit_hit) {
-    linear_running = true;
-    linear_armed = false;
-    linear_run_cmd = cmd[3];
-    linear_started_us = now;
-
-    bool forward = linear_run_cmd > 0.0f;
-    if (LINEAR_DRIVER == LINEAR_DRIVER_L298N) {
-      digitalWrite(LINEAR_PWM_B_PIN, forward ? HIGH : LOW);  // IN1
-      digitalWrite(LINEAR_CONTROL_PIN, forward ? LOW : HIGH);  // IN2
-      analogWrite(LINEAR_PWM_A_PIN, LINEAR_PWM);  // ENA
-    } else {
-      digitalWrite(LINEAR_CONTROL_PIN, HIGH);  // R_EN and L_EN
-      analogWrite(LINEAR_PWM_A_PIN, forward ? LINEAR_PWM : 0);  // RPWM
-      analogWrite(LINEAR_PWM_B_PIN, forward ? 0 : LINEAR_PWM);  // LPWM
+  if (!linear_running && button_pressed && linear_button_armed && !limit_hit) {
+    linear_button_armed = false;
+    if (linear_state == LINEAR_OPEN) {
+      startLinearMove(LINEAR_CLOSE_CMD, now);
+    } else if (linear_state == LINEAR_CLOSED) {
+      startLinearMove(LINEAR_OPEN_CMD, now);
     }
   }
 
   if (linear_running &&
       (limit_hit || (unsigned long)(now - linear_started_us) >= LINEAR_MAX_RUN_US)) {
-    linear_running = false;
-    linear_run_cmd = 0.0f;
-    stopLinearMotor();
+    finishLinearMove();
   }
 }
 
@@ -219,6 +247,9 @@ void setup() {
   pinMode(LINEAR_PWM_B_PIN, OUTPUT);
   pinMode(LINEAR_CONTROL_PIN, OUTPUT);
   stopLinearMotor();
+
+  // Establish a known starting state by opening the gripper on startup.
+  startLinearMove(LINEAR_OPEN_CMD, micros());
 
   for (int i = 0; i < DELTA_MOTOR_COUNT; i++) {
     pinMode(STEP_PINS[i], OUTPUT);
